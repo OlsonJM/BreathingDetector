@@ -31,11 +31,15 @@
 #include <Adafruit_MLX90614.h>          //Adafruit MLX IR sensor library      
 #include <Adafruit_FeatherOLED.h>       //Feather OLED Display library
 
-#define VBATPIN A7                      //Feather Analog In for Measuring 5V Battery
-#define TEMP_THRESHOLD 87.0             //Default exhale temperature threshold
-#define MIN_TEMP 80.0                   //Default patient detector temperature
-#define PATIENT_HYST 2                  //min +deg for patient present/absent. deltaT require to detect patient
-#define EXHALE_HYST 1                   //min +deg required state change from inhale to exhale
+#define VBATPIN A7                      //Analog IN # for Measuring 5V Battery
+#define AO_TEMP A0                      //Analog OUT for exporting temperature to scope/external
+//#define MEASURE_IN_C                    //COMMENT THIS LINE TO MEASURE IN FAHRENHEIT OTHERWISE IN CELCIUS
+#define TEMP_THRESHOLD 90.0             //Default exhale temperature threshold (ENTER IN PROPER UNITS F/C)
+#define MIN_TEMP 80.0                   //Default patient detector temperature (ENTER IN PROPER UNITS F/C)
+#define AO_MIN 70.0                     //Minimum Temperature for analog output (ENTER IN PROPER UNITS F/C)
+#define AO_MAX 110.0                    //Maximum Temperature for analog output (ENTER IN PROPER UNITS F/C)
+#define PATIENT_HYST 2.0                //min +deg for patient absent once detected
+#define EXHALE_HYST 1.0                 //min +deg required state change from inhale to exhale
 #define EXHALE true                     //Exhale = true state
 #define INHALE false                    //Inhale = false state
 #define BUTTON_B 6                      //"B" button pin #
@@ -44,17 +48,17 @@
 #define INHALE_PIN 12                   //Pin # used to indicae inhale detected
 #define PATIENT_PIN 10                  //Pin # used to indicate patient detected
 #define ALARM_PIN 13                    //Pin # used to indicate alarm condition
-#define MEASURE_DELAY_MILLIS 100         //milliseconds between measurement cycles
+#define MEASURE_DELAY_MILLIS 150        //milliseconds between measurement cycles
 #define OLED_SET_CHG_MILLIS 1000        //milliseconds to hold the display for changes threshold temps
 #define ALARM_DELAY_SEC 7               //seconds to set alarm if state change does not occur
-#define MEASURE_AVG 10                  //number of measurements to use to determine temperature
-#define MEASURE_AVG_MILLIS 5            //milliseconds between averaging measurements
+#define MEASURE_AVG 2                   //number of measurements to use to determine temperature
+#define MEASURE_AVG_MILLIS 50           //milliseconds between averaging measurements
 #define SERIAL_BAUD 19200               //Serial port baud rate
 #define ENABLE_SERIAL                   //COMMENT THIS LINE OUT TO DISABLE SERIAL
-//#define SERIAL_DATA                     //COMMENT THIS LINE OUT TO DISABLE data feed to serial port (requires ENABLE_SERIAL)
+#define SERIAL_DATA                     //COMMENT THIS LINE OUT TO DISABLE data feed to serial port (requires ENABLE_SERIAL)
 #define DISPLAY                         //COMMENT THIS LINE OUT TO DISABLE LOCAL DISPLAY
-#define DEBUG                           //UNCOMMENT TO ENABLE DEBUG VIA SERIAL (requires ENABLE_SERIAL)
-
+//#define DEBUG                           //UNCOMMENT TO ENABLE DEBUG VIA SERIAL (requires ENABLE_SERIAL)
+#define ENABLE_AO                       //COMMENT THIS LINE TO DISABLE WRITE TO ANALOG OUTPUT
 
 /***************************
  *  GLOBAL VARIABLES
@@ -65,6 +69,7 @@ Adafruit_MLX90614 mlx = Adafruit_MLX90614();              //MLX sensor
 #endif
 
 float objT= 0.0f;                                         //Object Temperature
+float ambT= 0.0f;                                         //Case temperature at sensor
 float tempThreshold = TEMP_THRESHOLD;                     //Exhale threshold temperature
 float minTemp = MIN_TEMP;                                 //Patient detetor temperature
 bool state = INHALE;                                      //Inhale/exhale state (Default=inhale)
@@ -75,12 +80,14 @@ bool thresholdSet = false;                                //FLAG:  Interrupt fla
 bool minimumSet = false;                                  //FLAG:  Interrupt flag for setting Patient detector temp
 bool thresholdSetDisp = false;                            //FLAG:  flag for exhale threshold change.
 bool minimumSetDisp = false;                              //FLAG:  flag for patient detector temp change.
+bool sensorFail = false;                                  //FLAG:  flag for faulty or open IR Sensor
 long stateTime = 0;                                       //Unix time stamp for current state
 long statePrevTime = 0;                                   //Unix stamp from previous state change
 long bpmTime = 0;                                         //Elapse time between respitory cycle
 long bpmPrevTime = 0;                                     //Start of respitory cycle
 float bpm = 0.0f;                                         //calculated breaths per minute (BPM)
 char exhaleCtr = 0;                                       //exhale counter for BPM calculator
+int tempDigital = 0;                                      //Analog output value
 
 /**************************
  *  FUNCTION PROTOTYPES
@@ -90,6 +97,7 @@ void setMinimum();                                        //INTERRUPT routine fo
 void updateDisplay();                                     //Updates the OLED display
 float getBatteryVoltage();                                //Measures the battery voltage and returns value in Volts DC
 void updateSerial();                                      //Send bitstatus via serial port
+void updateAO();                                          //Drive analog output with current temperature
 
 /***************
  *  Device Initialization
@@ -140,14 +148,40 @@ void setMinimum(){
  */
 void loop() {
   objT = 0.0f;
-
+  #ifdef MEAURE_IN_C
+    ambT = mlx.readAmbientTempC();
+  #else
+    ambT = mlx.readAmbientTempF();
+  #endif
+  
   for(char ctr=0;ctr<MEASURE_AVG;ctr++){
-    objT += mlx.readObjectTempF();        //Take measurement in Degrees F from MLX sensor
+    #ifdef MEASURE_IN_C
+      objT += mlx.readObjectTempC();        //Take measurement in Degrees C from MLX sensor
+    #else
+      objT += mlx.readObjectTempF();
+    #endif
+    
     delay(MEASURE_AVG_MILLIS);
   }
   objT = objT/MEASURE_AVG;               //find average measured temperature
 
-  if((objT-PATIENT_HYST)<(minTemp)){       // Determine if NEW patient is present
+  if(objT>500.0)                    //Detect open/faulty IR sensor
+    sensorFail = true;
+  else 
+    sensorFail = false;
+
+  //DEBUG PATIENT DETECTOR
+  /*
+  #ifdef DEBUG                           
+    Serial.print("OBJ TEMP = ");
+    Serial.println(objT);
+    Serial.print("Patient Threshold = ");
+    Serial.println(minTemp);
+    Serial.print("NO PATIENT = ");
+    Serial.println((objT+(float)PATIENT_HYST)<minTemp);
+  #endif
+  */
+  if((objT<(minTemp+PATIENT_HYST))&&!patient){    //looking for new patient
     patient = false;
     alarm = false;
     bpm = 0;
@@ -155,6 +189,19 @@ void loop() {
     digitalWrite(INHALE_PIN,LOW);
     digitalWrite(PATIENT_PIN,LOW);
     digitalWrite(ALARM_PIN,LOW);
+    
+    #ifdef SERIAL_DATA
+      updateSerial();
+    #endif       
+  }else if((objT<minTemp)&&patient){       //Patient absent and Below temp
+    patient = false;
+    alarm = false;
+    bpm = 0;
+    digitalWrite(EXHALE_PIN,LOW);
+    digitalWrite(INHALE_PIN,LOW);
+    digitalWrite(PATIENT_PIN,LOW);
+    digitalWrite(ALARM_PIN,LOW);
+    
     #ifdef SERIAL_DATA
       updateSerial();
     #endif       
@@ -236,7 +283,7 @@ void loop() {
       thresholdSetDisp = true;
     #endif
     tempThreshold = (int)objT;
-    delay(10);                        //for debounce
+    delay(50);                        //for debounce
     thresholdSet = false;
   }
 
@@ -245,12 +292,16 @@ void loop() {
       minimumSetDisp = true;
     #endif
     minTemp = (int)objT;
-    delay(10);                        //for debounce
+    delay(50);                        //for debounce
     minimumSet = false;
   }
 
   #ifdef DISPLAY
     updateDisplay();                   //UPDATE OLED DISPLAY
+  #endif
+
+  #ifdef ENABLE_AO
+    updateAO();                          //UPDATE ANALOG OUTPUT
   #endif
   
   delay(MEASURE_DELAY_MILLIS);
@@ -271,7 +322,12 @@ void updateDisplay(){
       oled.setTextSize(2);
       oled.print("  ");
       oled.print(tempThreshold);
-      oled.print(" F");
+      #ifdef MEASURE_IN_C
+        oled.print(" C");
+      #else
+        oled.print(" F");
+      #endif
+      
       oled.display();
       delay(OLED_SET_CHG_MILLIS);
     }
@@ -286,7 +342,11 @@ void updateDisplay(){
       oled.setTextSize(2);
       oled.print("  ");
       oled.print(minTemp);
-      oled.print(" F");
+      #ifdef MEASURE_IN_C
+        oled.print(" C");
+      #else
+        oled.print(" F");
+      #endif
       oled.display();
       delay(OLED_SET_CHG_MILLIS);
     }
@@ -299,7 +359,11 @@ void updateDisplay(){
     oled.print((int)minTemp);
     oled.print("/");
     oled.print((int)tempThreshold);
-    oled.print(" F");
+    #ifdef MEASURE_IN_C
+      oled.print(" C");
+    #else
+      oled.print(" F");
+    #endif
     
     // get the current voltage of the battery from
     float battery = getBatteryVoltage();
@@ -308,10 +372,13 @@ void updateDisplay(){
     oled.setBattery(battery);
     oled.renderBattery();
   
-    //Display the current breathing mode or "No Patient"
+    //Display the current breathing mode, "No Patient", or sensor fail
     oled.setCursor(0,9);
     oled.setTextSize(2);
-    if(patient){
+    if(sensorFail)
+    {
+      oled.println("CHK SENSOR");
+    }else if(patient){
       if(state)
         oled.println("EXHALE");
       else
@@ -322,13 +389,19 @@ void updateDisplay(){
     }
   
     //Display the measured temperature & breaths per minute
-    oled.setTextSize(1);
-    oled.print("T: ");
-    oled.print(objT);
-    oled.print(" F");
-    oled.setCursor(75,25);
-    oled.print("BPM: ");
-    oled.print((int)bpm);
+    if(!sensorFail){
+      oled.setTextSize(1);
+      oled.print("T: ");
+      oled.print(objT);
+      #ifdef MEASURE_IN_C
+        oled.print(" C");
+      #else
+        oled.print(" F");
+      #endif
+      oled.setCursor(75,25);
+      oled.print("BPM: ");
+      oled.print((int)bpm);
+    }
   
     // update the display with the new screen data
     oled.display();
@@ -356,7 +429,7 @@ float getBatteryVoltage() {
 /*************************
  * Formatted serial string to send out device status for
  * external device.
- *    FORMAT STRING:  Patient Present, Inhale/Exhale (false/true), Alarm, Breaths/minute, Measured temp
+ *    FORMAT STRING:  Patient Present, Inhale/Exhale (false/true), Alarm, Breaths/minute, Measured temp, Ambient Temp, Temperature units (C/F)
  */
  void updateSerial(){
   #ifdef ENABLE_SERIAL
@@ -387,10 +460,43 @@ float getBatteryVoltage() {
     Serial.print(",");
 
     //measured temperature
-    Serial.print("TEMP=");
+    Serial.print("OTEMP=");
     Serial.print(objT);
+    Serial.print(",");
 
+    //Ambient/sensor case temp
+    Serial.print("ATEMP=");
+    Serial.print(ambT);
+    Serial.print(",");
+
+    //Note temperature Units
+    Serial.print("T_UNIT=");
+    #ifdef MEASURE_IN_C
+      Serial.print("CELCIUS");
+    #else
+      Serial.print("FAHRENHEIT");
+    #endif
+    
     Serial.println();
   #endif
  }
+
+ /**********************
+  * ANALOG OUT FOR TRENDNG
+  */
+void updateAO(){
+  if(!sensorFail)
+    tempDigital = map(objT,AO_MIN,AO_MAX,0,255);
+  else
+    tempDigital = 0;
+    
+  analogWrite(AO_TEMP,tempDigital);
+  
+  #ifdef DEBUG                                        //Debug Analog Output
+    Serial.print("AO: ObjTemp = ");
+    Serial.print(objT);
+    Serial.print(" DigitalTemp = ");
+    Serial.println(tempDigital);
+  #endif
+}
 
