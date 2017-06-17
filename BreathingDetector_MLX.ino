@@ -48,11 +48,9 @@
 #define INHALE_PIN 12                   //Pin # used to indicae inhale detected
 #define PATIENT_PIN 10                  //Pin # used to indicate patient detected
 #define ALARM_PIN 13                    //Pin # used to indicate alarm condition
-#define MEASURE_DELAY_MILLIS 150        //milliseconds between measurement cycles
+#define MEASURE_DELAY_MILLIS 150        //milliseconds between measurement cycles (stability drifts when <150ms)
 #define OLED_SET_CHG_MILLIS 1000        //milliseconds to hold the display for changes threshold temps
 #define ALARM_DELAY_SEC 7               //seconds to set alarm if state change does not occur
-#define MEASURE_AVG 2                   //number of measurements to use to determine temperature
-#define MEASURE_AVG_MILLIS 50           //milliseconds between averaging measurements
 #define SERIAL_BAUD 19200               //Serial port baud rate
 #define ENABLE_SERIAL                   //COMMENT THIS LINE OUT TO DISABLE SERIAL
 #define SERIAL_DATA                     //COMMENT THIS LINE OUT TO DISABLE data feed to serial port (requires ENABLE_SERIAL)
@@ -147,24 +145,15 @@ void setMinimum(){
  *    MAIN PROCESS LOOP
  */
 void loop() {
-  objT = 0.0f;
+
   #ifdef MEAURE_IN_C
     ambT = mlx.readAmbientTempC();
+    objT = mlx.readObjectTempC(); 
   #else
     ambT = mlx.readAmbientTempF();
+    objT = objT = mlx.readObjectTempF();
   #endif
   
-  for(char ctr=0;ctr<MEASURE_AVG;ctr++){
-    #ifdef MEASURE_IN_C
-      objT += mlx.readObjectTempC();      //Take measurement in Degrees C from MLX sensor
-    #else
-      objT += mlx.readObjectTempF();
-    #endif
-    
-    delay(MEASURE_AVG_MILLIS);
-  }
-  objT = objT/MEASURE_AVG;                //find average measured temperature
-
   if(objT>500.0)                         //Detect open/faulty IR sensor
     sensorFail = true;
   else 
@@ -181,10 +170,11 @@ void loop() {
     Serial.println((objT+(float)PATIENT_HYST)<minTemp);
   #endif
   */
-  if((objT<(minTemp+PATIENT_HYST))&&!patient){    //looking for new patient
+  if((objT<(minTemp+PATIENT_HYST))&&!patient){          //looking for new patient
     patient = false;
     alarm = false;
     bpm = 0;
+    exhaleCtr = 0;
     digitalWrite(EXHALE_PIN,LOW);
     digitalWrite(INHALE_PIN,LOW);
     digitalWrite(PATIENT_PIN,LOW);
@@ -197,6 +187,7 @@ void loop() {
     patient = false;
     alarm = false;
     bpm = 0;
+    exhaleCtr = 0;
     digitalWrite(EXHALE_PIN,LOW);
     digitalWrite(INHALE_PIN,LOW);
     digitalWrite(PATIENT_PIN,LOW);
@@ -210,8 +201,6 @@ void loop() {
       patient = true;
       statePrevTime = millis()/1000;          //Reset all counters & timers for new patient
       stateTime = statePrevTime;
-      bpmTime = statePrevTime;
-      bpmPrevTime = bpmTime;
       exhaleCtr = 0;
       digitalWrite(PATIENT_PIN,HIGH);
       #ifdef SERIAL_DATA
@@ -224,6 +213,8 @@ void loop() {
        digitalWrite(EXHALE_PIN,HIGH);
        digitalWrite(INHALE_PIN,LOW);
        state  = EXHALE;
+       if(exhaleCtr == 0)
+          bpmPrevTime = millis()/1000;
        exhaleCtr++;
     }else if((objT<tempThreshold)&&(state==EXHALE))
     {
@@ -240,7 +231,7 @@ void loop() {
           bpmTime = millis()/1000;
           if((bpmTime - bpmPrevTime) != 0)              //avoid div by zero
           {
-            bpm = (1/((float)bpmTime-(float)bpmPrevTime))*120.0;       //time between exhales in seconds 
+            bpm = (1/((float)bpmTime-(float)bpmPrevTime))*60.0;       //time between exhales in seconds 
           }else{
             bpm = 0.0f;
           }
@@ -253,9 +244,7 @@ void loop() {
             Serial.print(", CALC BPM = ");
             Serial.println(bpm);
           #endif
-
           exhaleCtr = 0;
-          bpmPrevTime = bpmTime;
         }
         statePrevTime = stateTime;
         stateTime = millis()/1000;
