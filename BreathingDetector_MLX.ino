@@ -9,7 +9,7 @@
     
 
    Hardware:
-      (1) Adafruit Feather M0 Addalogger: https://www.adafruit.com/product/2796
+      (1) Adafruit Feather M0 Adalogger: https://www.adafruit.com/product/2796
       (1) Adafruit Feather OLED display: https://www.adafruit.com/product/2900
       (1) Adafruit Feather Backplane: https://www.adafruit.com/product/2890
       (1) Melexis MLX90614 IR Sensor:https://www.adafruit.com/product/1747
@@ -156,16 +156,16 @@ void loop() {
   
   for(char ctr=0;ctr<MEASURE_AVG;ctr++){
     #ifdef MEASURE_IN_C
-      objT += mlx.readObjectTempC();        //Take measurement in Degrees C from MLX sensor
+      objT += mlx.readObjectTempC();      //Take measurement in Degrees C from MLX sensor
     #else
       objT += mlx.readObjectTempF();
     #endif
     
     delay(MEASURE_AVG_MILLIS);
   }
-  objT = objT/MEASURE_AVG;               //find average measured temperature
+  objT = objT/MEASURE_AVG;                //find average measured temperature
 
-  if(objT>500.0)                    //Detect open/faulty IR sensor
+  if(objT>500.0)                         //Detect open/faulty IR sensor
     sensorFail = true;
   else 
     sensorFail = false;
@@ -193,7 +193,7 @@ void loop() {
     #ifdef SERIAL_DATA
       updateSerial();
     #endif       
-  }else if((objT<minTemp)&&patient){       //Patient absent and Below temp
+  }else if(objT<(minTemp-PATIENT_HYST)&&patient){       //Patient air drops below threshold
     patient = false;
     alarm = false;
     bpm = 0;
@@ -240,15 +240,18 @@ void loop() {
           bpmTime = millis()/1000;
           if((bpmTime - bpmPrevTime) != 0)              //avoid div by zero
           {
-            bpm = 1/(((float)bpmTime-(float)bpmPrevTime)/30.0);       //time between exhales in seconds divided by 60 sec/min
+            bpm = (1/((float)bpmTime-(float)bpmPrevTime))*120.0;       //time between exhales in seconds 
           }else{
             bpm = 0.0f;
           }
-          #ifdef DEBUG
+          
+          #ifdef DEBUG                                 //Debug breaths per minute
             Serial.print("BPM TIME = ");
-            Serial.println(bpmTime);
-            Serial.print("BPM PREV TIME = ");
-            Serial.println(bpmPrevTime);
+            Serial.print(bpmTime);
+            Serial.print(", BPM PREV TIME = ");
+            Serial.print(bpmPrevTime);
+            Serial.print(", CALC BPM = ");
+            Serial.println(bpm);
           #endif
 
           exhaleCtr = 0;
@@ -263,13 +266,16 @@ void loop() {
         if((millis()/1000-statePrevTime)>ALARM_DELAY_SEC){
           digitalWrite(ALARM_PIN,HIGH);
           alarm = true;
-          #ifdef DEBUG
-            Serial.println("ALARM = TRUE");
-            Serial.print("STATE PREV TIME = ");
-            Serial.println(statePrevTime);
-            Serial.print("CURRENT TIME = ");
+
+          /*
+          #ifdef DEBUG                                    //DEBUG ALARM
+            Serial.print("ALARM=TRUE,");
+            Serial.print(" STATE PREV TIME = ");
+            Serial.print(statePrevTime);
+            Serial.print(", CURRENT TIME = ");
             Serial.println(millis()/1000);
           #endif
+          */
         }
     }
 
@@ -378,6 +384,9 @@ void updateDisplay(){
     if(sensorFail)
     {
       oled.println("CHK SENSOR");
+    }else if(alarm)
+    {
+      oled.println("! ALARM !");
     }else if(patient){
       if(state)
         oled.println("EXHALE");
@@ -491,12 +500,14 @@ void updateAO(){
     tempDigital = 0;
     
   analogWrite(AO_TEMP,tempDigital);
-  
+
+  /*
   #ifdef DEBUG                                        //Debug Analog Output
     Serial.print("AO: ObjTemp = ");
     Serial.print(objT);
     Serial.print(" DigitalTemp = ");
     Serial.println(tempDigital);
   #endif
+  */
 }
 
